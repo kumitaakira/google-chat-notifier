@@ -2,10 +2,15 @@ import io
 import json
 import unittest
 import urllib.error
+import urllib.parse
 from contextlib import redirect_stderr
 from unittest.mock import patch
 
-from google_chat_notifier import GoogleChatNotifier, Notifier, TextMessage
+from google_chat_notifier import (
+    Button, ButtonGroup, ButtonStyle, Column, DecoratedText, Field, Grid, GridItem,
+    GoogleChatNotifier, Icon, Notification, NotificationTheme, Notifier, Row,
+    RowItem, Section, TextMessage, TextParagraph,
+)
 
 
 class RecordingNotifier(Notifier):
@@ -84,6 +89,41 @@ class MonitorTests(unittest.TestCase):
 
 
 class GoogleChatTests(unittest.TestCase):
+    @patch("google_chat_notifier.google_chat.urllib.request.urlopen")
+    def test_repeated_sends_use_same_thread_key(self, urlopen):
+        urlopen.return_value.__enter__.return_value.status = 200
+        notifier = GoogleChatNotifier(
+            "https://example.invalid/webhook?key=secret&token=also-secret&messageReplyOption=old",
+            thread_key="daily-report",
+        )
+        self.assertEqual(notifier.send(TextMessage("first")), 200)
+        self.assertEqual(notifier.send(TextMessage("second")), 200)
+        for call in urlopen.call_args_list:
+            request = call.args[0]
+            self.assertEqual(json.loads(request.data)["thread"], {"threadKey": "daily-report"})
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+            self.assertEqual(query["key"], ["secret"])
+            self.assertEqual(query["token"], ["also-secret"])
+            self.assertEqual(query["messageReplyOption"], ["REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"])
+
+    @patch("google_chat_notifier.google_chat.urllib.request.urlopen")
+    def test_monitor_uses_configured_thread_key(self, urlopen):
+        urlopen.return_value.__enter__.return_value.status = 200
+        notifier = GoogleChatNotifier("https://example.invalid/webhook?key=k", thread_key="job-1")
+
+        @notifier.monitor
+        def job():
+            return "done"
+
+        self.assertEqual(job(), "done")
+        payload = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(payload["thread"], {"threadKey": "job-1"})
+
+    def test_invalid_thread_key_is_rejected(self):
+        for key in ("", "  ", "a" * 4001):
+            with self.subTest(key_length=len(key)), self.assertRaises(ValueError):
+                GoogleChatNotifier("https://example.invalid", thread_key=key)
+
     def test_default_cards_include_result_and_error(self):
         notifier = GoogleChatNotifier("https://example.invalid/webhook")
         success = notifier.default_success_builder("job", 1.25, 0).build_payload()
@@ -111,6 +151,44 @@ class GoogleChatTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "Google Chat API error \\(400\\): invalid payload"):
             GoogleChatNotifier("https://example.invalid/webhook").send(TextMessage("hello"))
+
+
+class ComponentTests(unittest.TestCase):
+    def test_rich_components_preserve_order_and_cards_v2_fields(self):
+        widgets = [
+            TextParagraph("Alert\nCPU high", bold=True),
+            DecoratedText("database", top_label="Resource", bottom_label="production", end_icon=Icon("warning")),
+            Grid(columns=2, items=[GridItem("CPU", "85%", "https://example.com/cpu.png")]),
+            Row(items=[
+                RowItem(Column([Field("State", "warning"), TextParagraph("Needs attention")]), weight=2),
+                RowItem(TextParagraph("Open")),
+            ]),
+            ButtonGroup(buttons=[
+                Button("Runbook", "https://example.com/runbook", ButtonStyle.FILLED, Icon("book")),
+                Button("Metrics", "https://example.com/metrics", ButtonStyle.TEXT),
+            ]),
+        ]
+        notification = Notification(NotificationTheme.WARNING, title="Incident", sections=[Section(widgets=widgets)])
+        built = notification.build_payload()["cardsV2"][0]["card"]["sections"][0]["widgets"]
+        self.assertEqual([next(iter(item)) for item in built], [
+            "textParagraph", "decoratedText", "grid", "columns", "buttonList",
+        ])
+        self.assertEqual(built[1]["decoratedText"]["endIcon"], {"materialIcon": {"name": "warning"}})
+        self.assertEqual(built[2]["grid"]["items"][0]["image"]["imageUri"], "https://example.com/cpu.png")
+        self.assertEqual(built[3]["columns"]["columnItems"][1]["horizontalSizeStyle"], "FILL_MINIMUM_SPACE")
+        self.assertEqual(len(built[3]["columns"]["columnItems"][0]["widgets"]), 2)
+        self.assertEqual([button["type"] for button in built[4]["buttonList"]["buttons"]], ["FILLED", "BORDERLESS"])
+
+    def test_invalid_layouts_fail_instead_of_disappearing(self):
+        for widget in (
+            Grid(columns=0, items=[GridItem("x")]),
+            Row(items=[RowItem(TextParagraph("a"))] * 3),
+            Row(items=[RowItem(Grid(items=[GridItem("x")]))]),
+            Row(items=[RowItem(Column([]))]),
+            ButtonGroup(buttons=[]),
+        ):
+            with self.subTest(widget=type(widget).__name__), self.assertRaises(ValueError):
+                Section(widgets=[widget]).build(NotificationTheme.INFO)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional, Union
 
 _GSTATIC = "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols"
@@ -83,6 +84,72 @@ class LinkButton(Widget):
     url: str
 
 
+@dataclass
+class GridItem:
+    title: str
+    subtitle: Optional[str] = None
+    image_url: Optional[str] = None
+
+
+@dataclass
+class Grid(Widget):
+    title: Optional[str] = None
+    columns: int = 2
+    items: list[GridItem] = field(default_factory=list)
+
+
+@dataclass
+class RowItem:
+    widget: Widget
+    weight: int = 1
+
+
+@dataclass
+class Column(Widget):
+    """Stack multiple supported widgets inside one Row column."""
+    widgets: list[Widget]
+
+
+@dataclass
+class Row(Widget):
+    items: list[RowItem]
+
+
+@dataclass
+class TextParagraph(Widget):
+    text: str
+    color: Optional[str] = None
+    bold: bool = False
+
+
+@dataclass
+class DecoratedText(Widget):
+    text: str
+    top_label: Optional[str] = None
+    bottom_label: Optional[str] = None
+    start_icon: Optional[Union[Icon, str]] = None
+    end_icon: Optional[Union[Icon, str]] = None
+
+
+class ButtonStyle(Enum):
+    FILLED = "FILLED"
+    OUTLINED = "OUTLINED"
+    TEXT = "BORDERLESS"
+
+
+@dataclass
+class Button(Widget):
+    label: str
+    url: str
+    style: ButtonStyle = ButtonStyle.OUTLINED
+    icon: Optional[Union[Icon, str]] = None
+
+
+@dataclass
+class ButtonGroup(Widget):
+    buttons: list[Button]
+
+
 # ---------------------------------------------------------------------------
 # Styling & Themes (ThemeData equivalent)
 # ---------------------------------------------------------------------------
@@ -112,6 +179,100 @@ class NotificationTheme:
 # Layout & Structuring
 # ---------------------------------------------------------------------------
 
+def _icon_payload(icon: Union[Icon, str]) -> dict:
+    return {"materialIcon": {"name": icon.name}} if isinstance(icon, Icon) else {"iconUrl": icon}
+
+
+def _button_payload(button: Button) -> dict:
+    payload = {
+        "text": _esc_dollar(button.label),
+        "onClick": {"openLink": {"url": button.url}},
+        "type": button.style.value,
+    }
+    if button.icon is not None:
+        payload["icon"] = _icon_payload(button.icon)
+    return payload
+
+
+def _widget_payload(widget: Widget, style: NotificationStyle) -> dict:
+    default_icon = style.resolve_icon_url(style.field_icon)
+
+    if isinstance(widget, Field):
+        icon = widget.icon.url if isinstance(widget.icon, Icon) else widget.icon or default_icon
+        label = _colored(_esc_dollar(widget.label), widget.color, bold=True) if widget.color else _esc_dollar(widget.label)
+        return {"decoratedText": {"startIcon": {"iconUrl": icon}, "topLabel": label, "text": _nl_to_br(widget.value), "wrapText": True}}
+    if isinstance(widget, FieldLink):
+        icon = widget.icon.url if isinstance(widget.icon, Icon) else widget.icon or default_icon
+        label = _colored(_esc_dollar(widget.label), widget.color, bold=True) if widget.color else _esc_dollar(widget.label)
+        return {"decoratedText": {"startIcon": {"iconUrl": icon}, "topLabel": label, "text": _nl_to_br(widget.value), "wrapText": True, "button": {"text": _esc_dollar(widget.btn), "onClick": {"openLink": {"url": widget.url}}, "type": "OUTLINED"}}}
+    if isinstance(widget, Code):
+        return {"textParagraph": {"text": f"<code>{_nl_to_br(widget.text)}</code>"}}
+    if isinstance(widget, Image):
+        return {"image": {"imageUrl": widget.url}}
+    if isinstance(widget, Divider):
+        return {"divider": {}}
+    if isinstance(widget, TextParagraph):
+        content = _nl_to_br(widget.text)
+        if widget.color:
+            content = _colored(content, widget.color, bold=widget.bold)
+        elif widget.bold:
+            content = f"<b>{content}</b>"
+        return {"textParagraph": {"text": content}}
+    if isinstance(widget, DecoratedText):
+        content = {"text": _nl_to_br(widget.text), "wrapText": True}
+        if widget.top_label is not None:
+            content["topLabel"] = _esc_dollar(widget.top_label)
+        if widget.bottom_label is not None:
+            content["bottomLabel"] = _esc_dollar(widget.bottom_label)
+        if widget.start_icon is not None:
+            content["startIcon"] = _icon_payload(widget.start_icon)
+        if widget.end_icon is not None:
+            content["endIcon"] = _icon_payload(widget.end_icon)
+        return {"decoratedText": content}
+    if isinstance(widget, Grid):
+        if widget.columns < 1 or not widget.items:
+            raise ValueError("Grid requires at least one column and one item")
+        grid = {"columnCount": widget.columns, "items": []}
+        if widget.title is not None:
+            grid["title"] = _esc_dollar(widget.title)
+        for item in widget.items:
+            entry = {"title": _esc_dollar(item.title)}
+            if item.subtitle is not None:
+                entry["subtitle"] = _esc_dollar(item.subtitle)
+            if item.image_url is not None:
+                entry["image"] = {"imageUri": item.image_url}
+            grid["items"].append(entry)
+        return {"grid": grid}
+    if isinstance(widget, Row):
+        if not 1 <= len(widget.items) <= 2:
+            raise ValueError("Row supports one or two items")
+        if any(item.weight < 1 for item in widget.items):
+            raise ValueError("RowItem.weight must be positive")
+        minimum_weight = min(item.weight for item in widget.items)
+        columns = []
+        for item in widget.items:
+            children = item.widget.widgets if isinstance(item.widget, Column) else [item.widget]
+            if not children:
+                raise ValueError("Column requires at least one widget")
+            serialized = []
+            for child_widget in children:
+                child = _widget_payload(child_widget, style)
+                if next(iter(child)) not in {"textParagraph", "image", "decoratedText", "buttonList", "chipList"}:
+                    raise ValueError(f"{type(child_widget).__name__} is not supported inside Row")
+                serialized.append(child)
+            size = "FILL_MINIMUM_SPACE" if item.weight == minimum_weight and any(
+                other.weight > item.weight for other in widget.items
+            ) else "FILL_AVAILABLE_SPACE"
+            columns.append({"horizontalSizeStyle": size, "widgets": serialized})
+        return {"columns": {"columnItems": columns}}
+    if isinstance(widget, Button):
+        return {"buttonList": {"buttons": [_button_payload(widget)]}}
+    if isinstance(widget, ButtonGroup):
+        if not widget.buttons:
+            raise ValueError("ButtonGroup requires at least one button")
+        return {"buttonList": {"buttons": [_button_payload(button) for button in widget.buttons]}}
+    raise TypeError(f"Unsupported widget: {type(widget).__name__}")
+
 @dataclass
 class Section:
     header: Optional[str] = None
@@ -131,7 +292,6 @@ class Section:
         pending_buttons = []
 
         accent = style.color
-        default_field_icon = style.resolve_icon_url(style.field_icon)
 
         def flush_chips():
             if pending_chips:
@@ -187,20 +347,7 @@ class Section:
                 pending_buttons.append(w)
             else:
                 flush_inline()
-                if isinstance(w, Field):
-                    i_url = self._resolve_icon(w.icon, default_field_icon)
-                    top_lbl = _colored(_esc_dollar(w.label), w.color, bold=True) if w.color else _esc_dollar(w.label)
-                    out_widgets.append({"decoratedText": {"startIcon": {"iconUrl": i_url}, "topLabel": top_lbl, "text": _nl_to_br(w.value), "wrapText": True}})
-                elif isinstance(w, FieldLink):
-                    i_url = self._resolve_icon(w.icon, default_field_icon)
-                    top_lbl = _colored(_esc_dollar(w.label), w.color, bold=True) if w.color else _esc_dollar(w.label)
-                    out_widgets.append({"decoratedText": {"startIcon": {"iconUrl": i_url}, "topLabel": top_lbl, "text": _nl_to_br(w.value), "wrapText": True, "button": {"text": _esc_dollar(w.btn), "onClick": {"openLink": {"url": w.url}}, "type": "OUTLINED"}}})
-                elif isinstance(w, Code):
-                    out_widgets.append({"textParagraph": {"text": f"<code>{_nl_to_br(w.text)}</code>"}})
-                elif isinstance(w, Image):
-                    out_widgets.append({"image": {"imageUrl": w.url}})
-                elif isinstance(w, Divider):
-                    out_widgets.append({"divider": {}})
+                out_widgets.append(_widget_payload(w, style))
 
         flush_inline()
         flush_buttons()
