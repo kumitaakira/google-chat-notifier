@@ -96,6 +96,8 @@ notifier.send(TextMessage("集計が終わりました"))
 
 `thread_key` を省略した送信は従来どおり新しいメッセージになります。`thread_key` は同じ Webhook が始めたスレッドを指すため、Chat 上で人が作成した既存スレッドには指定できません。Google Chat の [スレッド付き Webhook の説明](https://developers.google.com/workspace/chat/quickstart/webhooks)も参照してください。
 
+**スレッド返信の通知:** `send()` が HTTP 200 を返しても、受信者のプッシュ通知は保証されません。このライブラリはサイレント送信を指定していませんが、Chat スペースの通知設定が「メインの会話」または「自分宛て」の場合、フォローしていないスレッドへの返信は通知されません。すべての返信を通知したい場合は、そのスペースの通知を「すべて」に設定します。特定のスレッドだけなら Chat 上でそのスレッドをフォローしてください。設定手順は [Google Chat の通知ヘルプ](https://support.google.com/chat/answer/7655718?hl=ja) を参照してください。Webhook から受信者の設定を無視して通知を強制することはできず、[強制通知は Chat アプリ認証が必要](https://developers.google.com/workspace/chat/create-messages#send-forced-notifications-or-silent-messages)です。
+
 `monitor` は同期関数を対象にします。元の戻り値と例外は維持され、通知やビルダーの失敗は標準エラーに警告を出して元の処理を妨げません。`@notifier.monitor` と `@notifier.monitor()` の両方を使えます。
 
 通知内容を変える場合は `(task_name, duration_seconds, result)` と `(task_name, duration_seconds, exception)` を受け取る関数を渡します。`None` を返すとその通知を省略します。引数 `on_success=None` または `on_error=None` でも該当通知を無効にできます。
